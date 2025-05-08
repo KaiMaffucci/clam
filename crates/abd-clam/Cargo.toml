@@ -1,6 +1,6 @@
 [package]
 name = "abd-clam"
-version = "0.30.0"
+version = "0.32.0"
 authors = [
     "Najib Ishaq <najib_ishaq@zoho.com>",
     "Tom Howard <info@tomhoward.codes>",
@@ -10,7 +10,7 @@ authors = [
     "Oliver McLaughlin <olwmcjp@gmail.com>",
 ]
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.81"  # using: `total_cmp`
 description = "Clustering, Learning and Approximation with Manifolds"
 license = "MIT"
 readme = "./README.md"
@@ -29,50 +29,56 @@ publish = true
 distances = { workspace = true }
 rayon = { workspace = true }
 rand = { workspace = true }
-serde = { workspace = true }
-mt_logger = { workspace = true }
-libm = { workspace = true }
+ftlog = { workspace = true }
 
-# TODO: Experiment with other serialization formats for performance.
-bincode = "1.3"
+# For:
+#  - IO from npy files
+#  - arrays in CHAODA
+ndarray = { workspace = true, optional = true }
+ndarray-npy = { workspace = true, optional = true }
 
-# Only used in CAKES
-# TODO: Break CAKES out into an optional feature
-priority-queue = "1.3.2"
+# For:
+#  - CHAODA
+smartcore = { version = "0.4", features = ["serde"], optional = true }
 
-# Only used in CHAODA
-# TODO: Break CHAODA out into an optional feature
-# automl = { version = "0.3.0", path = "../rust-automl" }
-# automl = { git = "https://github.com/nishaq503/rust-automl", branch = "updates/dependencies" }
-# TODO: Switch from automl to smartcore
-automl = "0.2.7"
+# For:
+#  - MSA
+stringzilla = { workspace = true, optional = true }
 
-# Only used for sharded datasets
-# TODO: Break sharded datasets out into an optional feature
-# memmap2 = "0.8.0"
-smartcore = "0.2.1"
-
+# For:
+#  - Disk I/O for most clusters and datasets
+serde = { workspace = true, optional = true }
+bitcode = { workspace = true, optional = true }
+flate2 = { workspace = true, optional = true }
+# - Reading and writing CSV files from clusters' properties and some datasets
+csv = { workspace = true , optional = true }
 
 [dev-dependencies]
 symagen = { workspace = true }
-criterion = { version = "0.5.1", features = ["html_reports"] }
+bitcode = { workspace = true }
+criterion = { version = "0.5", features = ["html_reports"] }
 tempdir = "0.3.7"
-float-cmp = "0.9.0"
+float-cmp = "0.10.0"
 test-case = "3.2.1"
 statistical = "1.0.0"
 
+[features]
+disk-io = ["dep:serde", "dep:csv", "dep:bitcode", "dep:flate2", "dep:ndarray", "dep:ndarray-npy"]
+chaoda = ["dep:smartcore"]
+mbed = ["chaoda"]
+msa = ["dep:stringzilla"]
+all = ["disk-io", "chaoda", "mbed", "msa"]
+
 [[bench]]
-name = "genomic"
+name = "vector_search"
 harness = false
 
 [[bench]]
-name = "knn-search"
+name = "genomic_search"
 harness = false
+required-features = ["msa"]
 
 [[bench]]
-name = "knn-vs-rnn"
+name = "ann_benchmarks"
 harness = false
-
-[[bench]]
-name = "rnn-search"
-harness = false
+required-features = ["disk-io"]

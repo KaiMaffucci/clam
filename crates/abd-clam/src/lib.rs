@@ -17,20 +17,20 @@
 #![doc = include_str!("../README.md")]
 
 pub mod cakes;
-pub mod chaoda;
 mod core;
 pub mod pancakes;
 pub mod utils;
 
-pub use crate::{
-    cakes::Cakes,
-    chaoda::graph,
-    core::{
-        cluster::{Cluster, MaxDepth, MinCardinality, PartitionCriteria, PartitionCriterion, UniBall},
-        dataset::{Dataset, Instance, VecDataset},
-        tree::Tree,
-    },
-};
+pub use core::{cluster, dataset, metric, Ball, Cluster, Dataset, FlatVec, Metric, SizedHeap, Tree, LFD};
+
+#[cfg(feature = "chaoda")]
+pub mod chaoda;
+
+#[cfg(feature = "mbed")]
+pub mod mbed;
+
+#[cfg(feature = "msa")]
+pub mod msa;
 
 /// The current version of the crate.
-pub const VERSION: &str = "0.30.0";
+pub const VERSION: &str = "0.32.0";

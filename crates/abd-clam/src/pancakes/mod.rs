@@ -1,8 +1,8 @@
-//! Compression and Decompression
+//! Compression and Decompression with CLAM
 
-mod codec;
-pub mod knn;
-pub mod rnn;
-mod search;
+mod cluster;
+mod dataset;
+mod sequence;
 
-pub use codec::{decode_general, encode_general, CodecData, DecoderFn, EncoderFn, SquishyBall};
+pub use cluster::{SquishCosts, SquishyBall};
+pub use dataset::{CodecData, Compressible, Decodable, Decompressible, Encodable, ParCompressible, ParDecompressible};

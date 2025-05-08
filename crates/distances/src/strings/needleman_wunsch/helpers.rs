@@ -46,10 +46,10 @@ pub enum Edit {
 /// best alignment at each position.
 pub fn compute_table<U: UInt>(x: &str, y: &str, penalties: Penalties<U>) -> Vec<Vec<(U, Direction)>> {
     // Initializing table; the inner vectors represent rows in the table.
-    let mut table = vec![vec![(U::zero(), Direction::Diagonal); x.len() + 1]; y.len() + 1];
+    let mut table = vec![vec![(U::ZERO, Direction::Diagonal); x.len() + 1]; y.len() + 1];
 
     // The top-left cell starts with a total penalty of zero and no direction.
-    table[0][0] = (U::zero(), Direction::Diagonal);
+    table[0][0] = (U::ZERO, Direction::Diagonal);
 
     // Initialize left-most column of distance values.
     for (i, row) in table.iter_mut().enumerate().skip(1) {
@@ -162,7 +162,7 @@ pub fn trace_back_iterative<U: UInt>(table: &[Vec<(U, Direction)>], [x, y]: [&st
 pub fn trace_back_recursive<U: UInt>(table: &[Vec<(U, Direction)>], [x, y]: [&str; 2]) -> (String, String) {
     let (mut aligned_x, mut aligned_y) = (Vec::new(), Vec::new());
 
-    _trace_back_recursive(
+    trb_helper(
         table,
         [y.len(), x.len()],
         [x.as_bytes(), y.as_bytes()],
@@ -186,8 +186,8 @@ pub fn trace_back_recursive<U: UInt>(table: &[Vec<(U, Direction)>], [x, y]: [&st
 /// * `[row_i, col_i]`: mutable indices into the table.
 /// * `[x, y]`: The two sequences to align, passed as slices of bytes.
 /// * `[aligned_x, aligned_y]`: mutable aligned sequences that will be built
-/// up from initially empty vectors.
-fn _trace_back_recursive<U: UInt>(
+///   up from initially empty vectors.
+fn trb_helper<U: UInt>(
     table: &[Vec<(U, Direction)>],
     [mut row_i, mut col_i]: [usize; 2],
     [x, y]: [&[u8]; 2],
@@ -212,7 +212,7 @@ fn _trace_back_recursive<U: UInt>(
                 row_i -= 1;
             }
         };
-        _trace_back_recursive(table, [row_i, col_i], [x, y], [aligned_x, aligned_y]);
+        trb_helper(table, [row_i, col_i], [x, y], [aligned_x, aligned_y]);
     }
 }
 
@@ -225,12 +225,12 @@ fn _trace_back_recursive<U: UInt>(
 ///
 /// # Returns
 ///
-/// A 2-slice of Vec<Edit>, each containing the edits needed to convert one aligned
+/// A 2-slice of `Vec<Edit>`, each containing the edits needed to convert one aligned
 /// sequence into the other.
 /// Since both input sequences are aligned, all edits are substitutions in the returned vectors are Substitutions.
 #[must_use]
 pub fn compute_edits(x: &str, y: &str) -> [Vec<Edit>; 2] {
-    [_x_to_y(x, y), _x_to_y(y, x)]
+    [x2y_helper(x, y), x2y_helper(y, x)]
 }
 
 /// Helper for `compute_edits` to compute the edits for turning aligned `x` into aligned `y`.
@@ -247,7 +247,7 @@ pub fn compute_edits(x: &str, y: &str) -> [Vec<Edit>; 2] {
 ///
 /// A vector of edits needed to convert `x` into `y`.
 #[must_use]
-pub fn _x_to_y(x: &str, y: &str) -> Vec<Edit> {
+pub fn x2y_helper(x: &str, y: &str) -> Vec<Edit> {
     x.chars()
         .zip(y.chars())
         .enumerate()

@@ -1,235 +1,329 @@
-//! Provides the `Cluster` trait, which defines the most basic functionality of
-//! a cluster.
-//!
-//! It also provides the `PartitionCriterion` trait, and implementations for
-//! `PartitionCriterion` for `MaxDepth` and `MinCardinality` which are used to
-//! determine when to stop partitioning the tree.
+//! A `Cluster` is a collection of "similar" items in a dataset.
 
-mod children;
-mod criteria;
-mod uni;
+use distances::{number::Float, Number};
+use rayon::prelude::*;
 
-pub use children::Children;
-pub use criteria::{MaxDepth, MinCardinality, PartitionCriteria, PartitionCriterion};
+pub mod adapter;
+mod balanced_ball;
+mod ball;
+mod lfd;
+mod partition;
+
+pub use balanced_ball::BalancedBall;
+pub use ball::Ball;
+pub use lfd::LFD;
+pub use partition::{ParPartition, Partition};
+
+#[cfg(feature = "disk-io")]
+mod io;
+
+#[cfg(feature = "disk-io")]
 #[allow(clippy::module_name_repetitions)]
-pub use uni::UniBall;
+pub use io::{ClusterIO, Csv, ParClusterIO, ParCsv};
 
-use core::{
-    fmt::{Debug, Display},
-    hash::Hash,
-    ops::Range,
-};
-use std::{
-    fs::File,
-    io::{BufReader, BufWriter},
-    path::Path,
-};
+use super::{dataset::ParDataset, metric::ParMetric, Dataset, Metric};
 
-use distances::Number;
-use serde::{Deserialize, Serialize};
-
-use crate::{Dataset, Instance};
-
-/// A `Cluster` represents a set of "similar" instances under some distance
-/// function.
-pub trait Cluster<U: Number>:
-    Serialize + for<'a> Deserialize<'a> + PartialEq + Eq + PartialOrd + Ord + Debug + Hash + Display + Send + Sync + Clone
-{
-    /// Creates a new `Cluster` from a given dataset.
-    fn new_root<I: Instance, D: Dataset<I, U>>(data: &D, seed: Option<u64>) -> Self;
-
-    /// Recursively partitions the `Cluster` until the `PartitionCriteria` are met.
-    #[must_use]
-    fn partition<I, D, P>(self, data: &mut D, criteria: &P, seed: Option<u64>) -> Self
-    where
-        I: Instance,
-        D: Dataset<I, U>,
-        P: PartitionCriterion<U>;
-
-    /// The offset of the indices of the `Cluster`'s instances in the dataset.
-    fn offset(&self) -> usize;
-
-    /// The number of points in the cluster.
-    fn cardinality(&self) -> usize;
-
-    /// The depth of the cluster in the tree.
+/// A `Cluster` is a collection of "similar" items in a dataset.
+///
+/// It represents a metric ball in a metric space. All items in a `Cluster` are
+/// within a certain distance of a center. The `Cluster` may have children,
+/// which are `Cluster`s of the same type.
+///
+/// # Type Parameters
+///
+/// - `T`: The type of the distance values between items.
+///
+/// # Remarks
+///
+/// A `Cluster` must have certain properties to be useful in CLAM. These are:
+///
+/// - `depth`: The depth of the `Cluster` in the tree.
+/// - `cardinality`: The number of items in the `Cluster`.
+/// - `indices`: The indices into a dataset of the items in the `Cluster`.
+/// - `arg_center`: The index of the geometric median of the items in the
+///   `Cluster`. This may be computed exactly, using all items in the `Cluster`,
+///   or approximately, using a subset of the items.
+/// - `radius`: The distance from the center to the farthest item in the
+///   `Cluster`.
+/// - `arg_radial`: The index of the item that is farthest from the center.
+/// - `lfd`: The Local Fractional Dimension of the `Cluster`.
+///
+/// A `Cluster` may have two or more children, which are `Cluster`s of the same
+/// type. The children should be stored as a tuple with:
+///
+/// - The index of the extremal item in the `Cluster` that was used to
+///   create the child.
+/// - The distance from that extremal item to the farthest item that was
+///   assigned to the child. We refer to this as the "extent" of the child.
+/// - The child `Cluster`.
+///
+/// # Examples
+///
+/// See:
+///
+/// - [`Ball`](crate::core::cluster::Ball)
+/// - [`BalancedBall`](crate::core::cluster::BalancedBall)
+/// - [`PermutedBall`](crate::cakes::PermutedBall)
+/// - [`SquishyBall`](crate::pancakes::SquishyBall)
+pub trait Cluster<T: Number>: PartialEq + Eq + PartialOrd + Ord + core::hash::Hash {
+    /// Returns the depth of the `Cluster` in the tree.
     fn depth(&self) -> usize;
 
-    /// The index of the instance at the `center` of the `Cluster`.
-    ///
-    /// TODO: Remove this method when we have "center-less" clusters.
+    /// Returns the cardinality of the `Cluster`.
+    fn cardinality(&self) -> usize;
+
+    /// Returns the index of the center item in the `Cluster`.
     fn arg_center(&self) -> usize;
 
-    /// The radius of the cluster.
-    fn radius(&self) -> U;
+    /// Sets the index of the center item in the `Cluster`.
+    ///
+    /// This is used to find the center item after permutation.
+    fn set_arg_center(&mut self, arg_center: usize);
 
-    /// The index of the instance with the maximum distance from the `center`
+    /// Returns the radius of the `Cluster`.
+    fn radius(&self) -> T;
+
+    /// Returns the index of the radial item in the `Cluster`.
     fn arg_radial(&self) -> usize;
 
-    /// The local fractal dimension of the `å`.
-    fn lfd(&self) -> f64;
-
-    /// The two child clusters.
-    fn children(&self) -> Option<[&Self; 2]>;
-
-    /// The distance between the two poles of the `Cluster` used for partitioning.
-    fn polar_distance(&self) -> Option<U>;
-
-    /// The indices of the instances used as poles for partitioning.
-    fn arg_poles(&self) -> Option<[usize; 2]>;
-
-    /// The `name` of the `Cluster` String.
+    /// Sets the index of the radial item in the `Cluster`.
     ///
-    /// This is a human-readable representation of the `Cluster`'s `offset` and
-    /// `cardinality`. It is a unique identifier in the tree. It may be used to
-    /// store the `Cluster` in a database, or to identify the `Cluster` in a
-    /// visualization.
-    fn name(&self) -> String {
-        format!("{}-{}", self.offset(), self.cardinality())
-    }
+    /// This is used to find the radial item after permutation.
+    fn set_arg_radial(&mut self, arg_radial: usize);
 
-    /// Descends to the `Cluster` with the given `offset` and `cardinality`.
-    ///
-    /// If such a `Cluster` does not exist, `None` is returned.
-    ///
-    /// # Arguments
-    ///
-    /// * `offset`: The offset of the `Cluster`'s instances in the dataset.
-    /// * `cardinality`: The number of instances in the `Cluster`.
-    fn descend_to(&self, offset: usize, cardinality: usize) -> Option<&Self> {
-        if self.offset() == offset && self.cardinality() == cardinality {
-            Some(self)
-        } else {
-            self.children()
-                .and_then(|ch| ch.iter().find_map(|c| c.descend_to(offset, cardinality)))
+    /// Returns the Local Fractional Dimension (LFD) of the `Cluster`.
+    fn lfd(&self) -> f32;
+
+    /// Returns whether this `Cluster` contains the given `index`ed point.
+    fn contains(&self, idx: usize) -> bool;
+
+    /// Gets the indices of the items in the `Cluster`.
+    fn indices(&self) -> Vec<usize>;
+
+    /// Sets the indices of the items in the `Cluster`.
+    fn set_indices(&mut self, indices: &[usize]);
+
+    /// The `extents` of a cluster are pairs of an index of an item in the
+    /// cluster and the distance from that item to the farthest item in the
+    /// cluster.
+    fn extents(&self) -> &[(usize, T)];
+
+    /// Returns the extents as a mutable slice.
+    fn extents_mut(&mut self) -> &mut [(usize, T)];
+
+    /// Adds an extent to the `Cluster`.
+    fn add_extent(&mut self, idx: usize, extent: T);
+
+    /// Clears the extents of the `Cluster` and returns the old extents.
+    fn take_extents(&mut self) -> Vec<(usize, T)>;
+
+    /// Returns the children of the `Cluster`.
+    #[must_use]
+    fn children(&self) -> Vec<&Self>;
+
+    /// Returns the children of the `Cluster` as mutable references.
+    #[must_use]
+    fn children_mut(&mut self) -> Vec<&mut Self>;
+
+    /// Sets the children of the `Cluster`.
+    fn set_children(&mut self, children: Vec<Box<Self>>);
+
+    /// Returns the owned children and sets the cluster's children to an empty vector.
+    fn take_children(&mut self) -> Vec<Box<Self>>;
+
+    /// Returns whether the `Cluster` is a descendant of another `Cluster`.
+    fn is_descendant_of(&self, other: &Self) -> bool;
+
+    /// Clears the indices stored with every cluster in the tree.
+    fn clear_indices(&mut self) {
+        if !self.is_leaf() {
+            self.children_mut().into_iter().for_each(Self::clear_indices);
         }
+        self.set_indices(&[]);
     }
 
-    /// Whether the `Cluster` is an ancestor of another `Cluster`.
-    fn is_ancestor_of(&self, other: &Self) -> bool {
-        other.depth() > self.depth()
-            && self.indices().contains(&other.offset())
-            && other.cardinality() < self.cardinality()
-    }
+    /// Trims the tree at the given depth. Returns the trimmed roots in the same
+    /// order as the leaves of the trimmed tree at that depth.
+    fn trim_at_depth(&mut self, depth: usize) -> Vec<Vec<Box<Self>>> {
+        let mut queue = vec![self];
+        let mut stack = Vec::new();
 
-    /// Whether the `Cluster` is a descendant of another `Cluster`.
-    fn is_descendant_of(&self, other: &Self) -> bool {
-        other.is_ancestor_of(self)
-    }
-
-    /// Whether the `Cluster` is a leaf node in the tree.
-    fn is_leaf(&self) -> bool {
-        self.children().is_none()
-    }
-
-    /// Whether the `Cluster` is a singleton, i.e. it contains only one instance or has a radius of zero.
-    fn is_singleton(&self) -> bool {
-        self.cardinality() == 1 || self.radius() == U::zero()
-    }
-
-    /// The indices of the instances in the `Cluster` after the dataset has been reordered.
-    fn indices(&self) -> Range<usize> {
-        self.offset()..(self.offset() + self.cardinality())
-    }
-
-    /// The subtree of the `Cluster`.
-    fn subtree(&self) -> Vec<&Self> {
-        let subtree = vec![self];
-        match self.children() {
-            Some(children) => subtree
-                .into_iter()
-                .chain(children.iter().flat_map(|c| c.subtree()))
-                .collect(),
-            None => subtree,
-        }
-    }
-
-    /// The maximum depth of and leaf in the subtree of the `Cluster`.
-    ///
-    /// If this `Cluster` is a leaf, the maximum depth is the depth of the `Cluster`.
-    fn max_leaf_depth(&self) -> usize {
-        self.subtree()
-            .iter()
-            .map(|c| c.depth())
-            .max()
-            .unwrap_or_else(|| self.depth())
-    }
-
-    /// Distance from the `center` to the given instance.
-    fn distance_to_instance<I: Instance, D: Dataset<I, U>>(&self, data: &D, instance: &I) -> U {
-        data.query_to_one(instance, self.arg_center())
-    }
-
-    /// Distance from the `center` of this `Cluster` to the center of the
-    /// `other` `Cluster`.
-    fn distance_to_other<I: Instance, D: Dataset<I, U>>(&self, data: &D, other: &Self) -> U {
-        data.one_to_one(self.arg_center(), other.arg_center())
-    }
-
-    /// Assuming the `Cluster` overlaps with the query ball, we return only
-    /// those children that also overlap with the query ball.
-    fn overlapping_children<I: Instance, D: Dataset<I, U>>(&self, data: &D, query: &I, radius: U) -> Vec<&Self> {
-        if self.is_leaf() {
-            Vec::new()
-        } else {
-            let [left, right] = self
-                .children()
-                .unwrap_or_else(|| unreachable!("We checked that the cluster is not a leaf."));
-            let [arg_l, arg_r] = self
-                .arg_poles()
-                .unwrap_or_else(|| unreachable!("We checked that the cluster is not a leaf."));
-            let polar_distance = self
-                .polar_distance()
-                .unwrap_or_else(|| unreachable!("We checked that the cluster is not a leaf."));
-
-            let ql = data.query_to_one(query, arg_l);
-            let qr = data.query_to_one(query, arg_r);
-
-            let swap = ql < qr;
-            let (ql, qr) = if swap { (qr, ql) } else { (ql, qr) };
-
-            if (ql + qr) * (ql - qr) <= U::from(2) * polar_distance * radius {
-                vec![left, right]
-            } else if swap {
-                vec![left]
+        while let Some(c) = queue.pop() {
+            if c.depth() == depth {
+                stack.push(c);
             } else {
-                vec![right]
+                queue.extend(c.children_mut());
             }
         }
+
+        stack.into_iter().map(Self::take_children).collect()
     }
 
-    /// Saves a `Cluster` to a given location.
-    ///
-    /// # Arguments
-    ///
-    /// * `path`: The path to the `Cluster` file.
-    ///
-    /// # Errors
-    ///
-    /// * If the file cannot be created.
-    /// * If the file cannot be serialized.
-    fn save(&self, path: &Path) -> Result<(), String> {
-        let mut writer = BufWriter::new(File::create(path).map_err(|e| e.to_string())?);
-        bincode::serialize_into(&mut writer, self).map_err(|e| e.to_string())?;
-        Ok(())
+    /// Inverts the `trim_at_depth` method.
+    fn graft_at_depth(&mut self, depth: usize, trimmings: Vec<Vec<Box<Self>>>) {
+        let mut queue = vec![self];
+        let mut stack = Vec::new();
+
+        while let Some(c) = queue.pop() {
+            if c.depth() == depth {
+                stack.push(c);
+            } else {
+                queue.extend(c.children_mut());
+            }
+        }
+
+        stack
+            .into_iter()
+            .zip(trimmings)
+            .for_each(|(c, children)| c.set_children(children));
     }
 
-    /// Loads a `Cluster` from a given location.
-    ///
-    /// # Arguments
-    ///
-    /// * `path`: The path to the `Cluster` file.
-    ///
-    /// # Returns
-    ///
-    /// * The `Cluster` loaded from the file.
-    ///
-    /// # Errors
-    ///
-    /// * If the file cannot be opened.
-    /// * If the file cannot be deserialized.
-    fn load(path: &Path) -> Result<Self, String> {
-        let reader = BufReader::new(File::open(path).map_err(|e| e.to_string())?);
-        bincode::deserialize_from(reader).map_err(|e| e.to_string())
+    /// Returns all `Cluster`s in the subtree of this `Cluster`, in depth-first order.
+    fn subtree<'a>(&'a self) -> Vec<&'a Self>
+    where
+        T: 'a,
+    {
+        let mut clusters = vec![self];
+        self.children()
+            .into_iter()
+            .for_each(|child| clusters.extend(child.subtree()));
+        clusters
+    }
+
+    /// Returns all leaf `Cluster`s in the subtree of this `Cluster`, in depth-first order.
+    fn leaves<'a>(&'a self) -> Vec<&'a Self>
+    where
+        T: 'a,
+    {
+        let mut queue = vec![self];
+        let mut stack = vec![];
+
+        while let Some(cluster) = queue.pop() {
+            if cluster.is_leaf() {
+                stack.push(cluster);
+            } else {
+                queue.extend(cluster.children());
+            }
+        }
+
+        stack
+    }
+
+    /// Returns mutable references to all leaf `Cluster`s in the subtree of this `Cluster`, in depth-first order.
+    fn leaves_mut<'a>(&'a mut self) -> Vec<&'a mut Self>
+    where
+        T: 'a,
+    {
+        let mut queue = vec![self];
+        let mut stack = vec![];
+
+        while let Some(cluster) = queue.pop() {
+            if cluster.is_leaf() {
+                stack.push(cluster);
+            } else {
+                queue.extend(cluster.children_mut());
+            }
+        }
+
+        stack
+    }
+
+    /// Whether the `Cluster` is a leaf in the tree.
+    fn is_leaf(&self) -> bool {
+        self.children().is_empty()
+    }
+
+    /// Whether the `Cluster` is a singleton.
+    fn is_singleton(&self) -> bool {
+        self.cardinality() == 1 || self.radius() < T::EPSILON
+    }
+
+    /// Returns the expected radii for `k` items from each cluster center using
+    /// clusters whose cardinality is no greater than `k` but whose parents have
+    /// cardinality greater than `k`.
+    fn radii_for_k<F: Float>(&self, k: usize) -> Vec<F> {
+        if self.cardinality() <= k {
+            vec![F::from(self.radius())]
+        } else {
+            self.children()
+                .into_iter()
+                .map(|c| (c.cardinality(), c.radii_for_k::<F>(k)))
+                .flat_map(|(car, radii)| radii.into_iter().map(move |r| (car, r)))
+                .map(|(c, r)| if c == k { r } else { r * F::from(c) / F::from(k) })
+                .collect()
+        }
+    }
+
+    /// Returns whether this cluster has any overlap with a query and a radius,
+    /// and the distances to the cluster extrema.
+    fn overlaps_with<I, D: Dataset<I>, M: Metric<I, T>>(
+        &self,
+        data: &D,
+        metric: &M,
+        query: &I,
+        radius: T,
+    ) -> (bool, Vec<T>) {
+        let (extrema, extents): (Vec<_>, Vec<_>) = self.extents().iter().copied().unzip();
+        let distances = data
+            .query_to_many(query, &extrema, metric)
+            .map(|(_, d)| d)
+            .collect::<Vec<_>>();
+        (distances.iter().zip(extents).all(|(&d, e)| d <= e + radius), distances)
+    }
+
+    /// Returns only those children of the `Cluster` that overlap with a query
+    /// and a radius.
+    fn overlapping_children<I, D: Dataset<I>, M: Metric<I, T>>(
+        &self,
+        data: &D,
+        metric: &M,
+        query: &I,
+        radius: T,
+    ) -> Vec<(&Self, Vec<T>)> {
+        self.children()
+            .into_iter()
+            .map(|c| (c, c.overlaps_with(data, metric, query, radius)))
+            .filter(|&(_, (o, _))| o)
+            .map(|(c, (_, ds))| (c, ds))
+            .collect()
+    }
+}
+
+/// A parallelized version of the `Cluster` trait.
+#[allow(clippy::module_name_repetitions)]
+pub trait ParCluster<T: Number>: Cluster<T> + Send + Sync {
+    /// Parallel version of [`Cluster::indices`](crate::core::cluster::Cluster::indices).
+    fn par_indices(&self) -> impl ParallelIterator<Item = usize>;
+
+    /// Parallel version of [`Cluster::overlaps_with`](crate::core::cluster::Cluster::overlaps_with).
+    fn par_overlaps_with<I: Send + Sync, D: ParDataset<I>, M: ParMetric<I, T>>(
+        &self,
+        data: &D,
+        metric: &M,
+        query: &I,
+        radius: T,
+    ) -> (bool, Vec<T>) {
+        let (extrema, extents): (Vec<_>, Vec<_>) = self.extents().iter().copied().unzip();
+        let distances = data
+            .par_query_to_many(query, &extrema, metric)
+            .map(|(_, d)| d)
+            .collect::<Vec<_>>();
+        (distances.iter().zip(extents).all(|(&d, e)| d <= e + radius), distances)
+    }
+
+    /// Parallel version of [`Cluster::overlapping_children`](crate::core::cluster::Cluster::overlapping_children).
+    fn par_overlapping_children<I: Send + Sync, D: ParDataset<I>, M: ParMetric<I, T>>(
+        &self,
+        data: &D,
+        metric: &M,
+        query: &I,
+        radius: T,
+    ) -> Vec<(&Self, Vec<T>)> {
+        self.children()
+            .into_par_iter()
+            .map(|c| (c, c.par_overlaps_with(data, metric, query, radius)))
+            .filter(|&(_, (o, _))| o)
+            .map(|(c, (_, ds))| (c, ds))
+            .collect()
     }
 }

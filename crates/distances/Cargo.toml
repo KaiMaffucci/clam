@@ -1,6 +1,6 @@
 [package]
 name = "distances"
-version = "1.7.1"
+version = "1.8.0"
 authors = [
     "Najib Ishaq <najib_ishaq@zoho.com>",
     "Noah Daniels <noah_daniels@uri.edu>",
@@ -19,11 +19,14 @@ publish = true
 [dependencies]
 rand = { workspace = true }
 serde = { workspace = true }
+libm = { workspace = true }
+num-integer = { workspace = true }
 
 [dev-dependencies]
 symagen = { workspace = true }
 criterion = { version = "0.5.1", features = ["html_reports"] }
 test-case = "3.2.1"
+stringzilla = "3.9.3"
 
 [[bench]]
 name = "inv-sqrt"
